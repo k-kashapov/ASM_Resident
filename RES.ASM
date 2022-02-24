@@ -6,9 +6,8 @@ org 100h
 STAYRES macro                   ; terminates the program and keeps it resident
         mov AX, 3100h
         mov DX, offset DataEnd  ; save in DX the amount of paragraphs needed
-        ; add DX, 15d             ; DX += 15 in case right shift drops any neccessary bits off
+        add DX, 15d             ; DX += 15 in case right shift drops any neccessary bits off
         shr DX, 04h             ; paragraph = 16 bytes
-        inc DX
         int 21h
 endm
 
@@ -17,7 +16,7 @@ KBRD_ACK macro
         mov AH, AL                      ; save last read scancode byte to AH
         or  AL, 80h                     ; 0....b -> 1....b
         out 61h, AL                     ; send changed byte to kbrd ctrl
-        mov AL, AH                     ; AL = saved Byte
+        mov AL, AH                      ; AL = saved Byte
         out 61h, AL                     ; send original byte to kbrd ctrl
 endm
 
@@ -37,10 +36,10 @@ _start:
         mov DI, offset Old09
         
         mov AX, WP ES:[BX]              ; Save old int addr to AX
-        mov [DI], AX          ; Save it to Old09 lower 2 bytes
+        mov [DI], AX                    ; Save it to Old09 lower 2 bytes
 
         mov AX, WP ES:[BX + 2]          ; Save old int seg to AX
-        mov [DI + 2], AX      ; Save seg to Old09 elder 2 bytes
+        mov [DI + 2], AX                ; Save seg to Old09 elder 2 bytes
 
         cli                             ; Forbid interrupts
                                         ; Put our own Seg:Addr into int table
@@ -53,6 +52,43 @@ _start:
 
         STAYRES
 
+
+;##############################################
+; Draws a line on the screen
+;
+; Expects: 
+;	AH - Color of the line
+;	CX - Length of the line
+; 	SI - addr of 3-byte line style array
+;	DI - addr of start of line
+;
+; Note:
+;	ES = videoseg addr (0b800h)
+;	BX += number of empty lines * width of the line
+;
+; Returns:  None
+; Destr: 
+;	AX
+;##############################################
+
+DrawLine 	proc
+					; UL corner
+		lodsb			; ld byte from [si] to al
+		stosw			; mov al to es:[di]
+		
+                jcxz @@Ret
+
+		lodsb			; U prt
+		rep stosw	        ; repeat stosw while cl > 0
+
+		lodsb			; TR corner
+		stosw
+
+@@Ret:
+		add bx, SCR_WIDTH	; bx = rows offset
+		ret
+endp
+
 ;==============================================
 ; Our resident function
 ;==============================================
@@ -63,7 +99,7 @@ Res09   proc
         mov AX, 0B800h                  ; Save video segment to ES
         mov ES, AX
 
-        mov DI, (80d * 4 + 40d) * 2     ; 40th symbol, 5th row
+        mov DI, (80d * 4 + 39d) * 2     ; 40th symbol, 5th row
         mov AH, 4Eh                     ; blue on white
 
         in  AL, 60h                     ; read from keyboard buffer
@@ -77,6 +113,8 @@ Old09   dd 0
 
         iret
 endp
+
+Regs    db 'AX: BX: CX: DX: '
 
 DataEnd:
 end _start
