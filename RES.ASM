@@ -245,23 +245,150 @@ Res08   proc
 Old08   dd 0
 endp
 
+;==============================================
+; Checks if arrow key is pressed
+; Expects:
+;       AL - key scancode
+; Returns:
+;       CX += relative offset
+;             Up    += -80 * 12
+;             Down  +=  80 * 12
+;             Left  += -16
+;             Right +=  16
+;==============================================
+
+ChkArr  proc
+        cmp AL, 4Bh                     ; left arrow key
+        jne @@RArr
+        sub CX, 16
+
+        jmp @@Fin
+
+@@RArr:
+        cmp AL, 4Dh                     ; right arrow key
+        jne @@UArr
+
+        add CX, 16
+        jmp @@Fin 
+
+@@UArr:
+        cmp AL, 48h                     ; Up arrow key
+        jne @@DArr
+
+        sub CX, 80d * 12
+        jmp @@Fin
+
+@@DArr:
+        cmp AL, 50h                     ; Up arrow key
+        jne @@Fin
+
+        add CX, 80d * 12
+@@Fin:
+        ret
+endp
+
 RSHIFT  equ 36h
 LSHIFTD = 2Ah
 LSHIFTU = 2Ah or 80h
 
-Res09   proc
+;==============================================
+; Draws (or saves) a rectangle from (to) buffer 
+; to (from) the screen
+; Expects:
+;       DI - Top-Left corner of the border
+;       ES - Video Segment
+;       CH - Height
+;       CL - Width
+;       SI - Buffer to draw from
+;       BH - 00h  = copy from buf to scr
+;            else = copy from scr to buf
+; Destr:
+;       AX
+;==============================================
+
+CpyBuf proc pascal
+        xor AX, AX
+        mov AL, CH                              ; save width to AL
+
+@@LineLoop:
+        cmp BH, 00h                             ; if BH != 0, copy from screen to buffer
+        jne @@Saving
+
+        mov BL, CS:[SI]                         ; copy bytes to videomem
+        mov ES:[DI], BL
+        jmp @@Moving
+
+@@Saving:
+        mov BL, ES:[DI]
+        mov CS:[SI], BL
+        ; movs BYTE PTR CS:[SI], ES:[DI]          ; save bytes to buffer
+
+@@Moving:
+        inc  SI
+        inc  DI
+        dec  CH                                 ; iterate width
+        cmp  CH, 00h
+        ja   @@LineLoop
+        
+        mov  CH, AL                             ; reset width
+
+        sub  DI, AX                             ; move DI back to the first byte
+
+        add  DI, 80d * 2                        ; next line
+
+        dec  CL                                 ; iterate height
+        cmp  CL, 00h
+        ja   @@LineLoop
+
+        ret
+endp
+
+;==============================================
+; Turns the frame on/off. Draws buffer data 
+; on screen or copies a rectangle into it
+;
+; Expects:
+;       CS:ISOn  - On/Off flag
+;                  00h = Off
+;                  Else = On
+;       CS:CURDI - Video offset
+;==============================================
+
+SwitchOn proc pascal
+USES AX, BX, CX, DI, SI, ES
+        mov BH, CS:ISOn                 ; On/Off flag to BL
+
+        mov DI, CS:CURDI                ; set DI to current top-left pos
+
+        mov SI, DI
+        add SI, 80 * 25 * 2             ; next video page
+
+        mov AX, 0B800h                  ; save video segment to ES
+        mov ES, AX
+
+        mov CX, 1006h                   ; CX = Width|Height
+        
+        call CpyBuf
+
+        ret
+endp
+
 ;----------------------------------------------
 ;       THE FEATURE
 ;       Allows you to move frame by 
 ;       pressing Shift + U/D/L/R
 ;----------------------------------------------
-        push ES DI BX AX
+Res09   proc
+        push ES DI CX AX
 
+        xor CX, CX                      ; CX = 0
         in  AL, 60h                     ; read from kbrd buffer
         cmp AL, RSHIFT                  ; if right shift
         jne @@CheckOn
 
         not CS:ISOn                     ; turn on/off
+        call SwitchOn
+        jmp @@Fin
 
 @@CheckOn:
         cmp CS:ISOn, 00h                ; if frame is off
@@ -271,54 +398,48 @@ Res09   proc
         jne @@CheckLshiftUP
 
         mov LShDwn, 01h                 ; change L shift flag
+        jmp @@LShiftDown
 
 @@CheckLshiftUP:
         cmp AL, LSHIFTU                 ; check L shift is released
         jne @@CheckLshift
 
         mov LShDwn, 00h                 ; if released, turn flag off
+        jmp @@Fin
 
 @@CheckLshift:
         cmp LShDwn, 00h                 ; check if left shift flag 
         je  @@Fin
 
-@@LShiftDown:
-                                        ; else: move it around
-        cmp AL, 4Bh                     ; left arrow key
-        jne @@RArr
-        sub CS:CURDI, 16
+@@LShiftDown:                           ; if left shift is pressed, check arrow keys
+        push CX
+        xor CX, CX                      ; CX = 0
 
-        jmp @@NoOldInt 
+        call ChkArr                     ; CX += video offset
 
-@@RArr:
-        cmp AL, 4Dh                     ; right arrow key
-        jne @@UArr
+        cmp CX, 0000h
+        je @@JustShift                  ; if no arrow key pressed, run original int
 
-        add CS:CURDI, 16
-        jmp @@NoOldInt 
+        not CS:ISOn                     ; when moving: turn the frame off
+        call SwitchOn                   ; print buffer to screen
 
-@@UArr:
-        cmp AL, 48h                     ; Up arrow key
-        jne @@DArr
+        add CS:CURDI, CX                ; update top-left corner pos
+        pop CX
 
-        sub CS:CURDI, 80d * 12
-        jmp @@NoOldInt
+        not CS:ISOn                     ; turn on
+        call SwitchOn                   ; save from screen to buffer
 
-@@DArr:
-        cmp AL, 50h                     ; Up arrow key
-        jne @@NoOldInt
-
-        add CS:CURDI, 80d * 12
-
-@@NoOldInt:
         KBRD_ACK
         EOI
 
-        pop AX BX DI ES
+        pop AX CX DI ES
         iret
 
+@@JustShift:
+        pop CX
+
 @@Fin:
-        pop AX BX DI ES
+        pop AX CX DI ES
         db 0EAh                         ; longjmp to old 09h
 Old09   dd 0
 
@@ -328,11 +449,9 @@ RegVal  db 4 dup ('0'), '$'
 HEX     db '0123456789ABCDEFghijklmnop'
 BRD	db 0DAh, 0C4h, 0BFh, 0B3h, ' ', 0B3h, 0C0h, 0C4h, 0D9h	; std border 1 symbols
 CURDI   dw (80 * 2 - 8) * 2
-LASTKEY db 00h
 ISOn    db 00h
 LShDwn  db 00h
 
-BackBuf db ?
 
 DataEnd:
 end _start
