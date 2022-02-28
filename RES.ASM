@@ -76,7 +76,7 @@ _start:
 
         STAYRES                         ; Terminate and stay resident
 
-;##############################################
+;==============================================
 ; Draws a line on the screen
 ;
 ; Expects: 
@@ -92,7 +92,7 @@ _start:
 ;
 ; Returns:  
 ;       None
-;##############################################
+;==============================================
 
 DrawLine proc
 				; UL corner
@@ -144,7 +144,7 @@ itoa16  proc
         ret
 endp
 
-;##############################################
+;==============================================
 ; Draws str from buffer to the video RAM
 ; Expects:
 ;	AH - Color
@@ -154,7 +154,7 @@ endp
 ;	RegVal - Buffer
 ; Note:
 ;	ES = videoseg addr (0b800h)
-;##############################################
+;==============================================
 
 DrawStr proc
         lodsb				; load from [si] to al
@@ -187,21 +187,39 @@ DrawStr proc
 endp
 
 ;==============================================
-; Our resident function
-; Registers:
-;       AX - Color|symbol
-;       BX = DI - Video addr to write into
-;       DS - Curr (code) segment
-;       ES - Video segment
-;       SI - Border buffer
-;       CX - Border len
+; Draws frame during 08 int
 ;==============================================
 
-Res08   proc
-        cmp CS:ISOn, 00h                ; if frame is off
-        je @@NoFrame                    ; do nothing
+;##############################################
+; VIDEOPAGES AND DOUBLE BUFFERIZATION:
+;
+;----------------------------------------------
+;       0 <-- Actual video memory. We see this 
+;             on screen
+;       
+;       ADDR = 0b800h:DI
+;
+;----------------------------------------------
+;       1 <-- Video memory clone. We restore
+;             original image from here after 
+;             the frame is turned off
+;
+;       ADDR = 0b800h:DI + 80 * 25  *  2
+;                          ↑    ↑      ↑
+;                        width  |      |
+;                             height   |
+;                                      |
+;                           sym on scr = 2 bytes
+;----------------------------------------------
+;       2 <-- Last drawn frame. We compare it 
+;             to the updated video memory to 
+;             update 1st page respectively
+;
+;       ADDR = 0b800h:DI + 80 * 25 * 2 * 2
+;##############################################
 
-        push AX BX CX DX DI DS ES SI
+DrawFrame proc pascal
+USES AX, BX, CX, DX, DI, DS, ES, SI
         push AX BX CX DX                ; save main registers to stack
 
         mov AX, CS                      ; set DS to curr code segment
@@ -210,7 +228,8 @@ Res08   proc
         mov AX, 0B800h                  ; save video segment to ES
         mov ES, AX
 
-        mov DI, CS:CURDI
+        mov DI, CS:CURDI                ; set DI to the saved position
+        ; add DI, 80 * 25 * 2 * 2         ; videopage 2
 
         mov BX, DI                      ; save offset to BX
         mov AH, 09h                     ; color = blue on black
@@ -239,10 +258,148 @@ Res08   proc
         mov CX, 6d                      ; bottom line width
         call DrawLine                   ; draw bottom line
 
-        pop SI ES DS DI DX CX BX AX
+        ret
+endp
+
+;==============================================
+; Compares video memory buffers on pages 0
+; and 2. If any byte is changed, updates page 1
+; buffer. As a result, page 1 will contain
+; relevant screen image
+; Expects:
+;       CH - Width
+;       CL - Height
+;       CS:CURDI - video offset to start from
+; Regs:
+;       AL - Saved width
+;       ES - Video Segment 0b800h
+;       DS - Video page 1 segment
+;            DS = 0b800h + 80 * 25 * 2 / 16
+;       DI - Video page 0 and 1 iterator
+;       SI - Video page 2 iterator
+;
+; Note:
+;       SI = DI + 80 * 25 * 2 
+;       SI points at the same coordinates as
+;       DI, but on the next page
+;
+;==============================================
+
+;##############################################
+; Explanation:
+;    PAGE 0:
+;       xxxxxxxxxxxx    
+;       x    1     x - A byte has just been
+;       x    ↑     x   updated.
+;       x [ES:DI]  x   
+;       xxxxxxxxxxxx   NEXT: PAGE 2
+;
+;   PAGE 1:
+;       xxxxxxxxxxxx    
+;       x    9     x - So we update our screen
+;       x    ↑     x   copy: 9 -> 1.
+;       x [DS:DI]  x   
+;       xxxxxxxxxxxx   NEXT: FINALLY
+;
+;   PAGE 2:
+;       xxxxxxxxxxxx    
+;       x    4     x - We compare it to the
+;       x    ↑     x   previous screen state.
+;       x [DS:SI]  x   They are not equal. (4 != 1)
+;       xxxxxxxxxxxx   NEXT: PAGE 1
+; 
+;       FINALLY:
+;               After that, we print the newest
+;               version of frame into Page 2 buffer
+;##############################################
+
+UpdateBuf proc pascal
+USES AX, CX, DI, DS, ES, SI
+        mov AX, 0B800h                  ; save video segment to ES
+        mov ES, AX
+
+        add AX, 80 / 16 * 25 * 2        ; DS = ES + page size
+        mov DS, AX                      ; = video page 1 segment
+
+        mov DI, CS:CURDI                ; set DI to the saved position
+        mov SI, DI                      ; set SI = DI
+
+        add SI, 80 * 25 * 2             ; videopage 2
+        
+        xor AX, AX
+        mov AL, CH                      ; save width to AL
+
+@@Loop:
+        mov AH, ES:[DI]                 ; save page 0 byte to AH
+        cmp DS:[SI], AH                 ; compare pages 0 and 2
+        je  @@Continue                  ; if they are equal, continue comparing
+                                        ; else
+        mov DS:[DI], AH                 ; update page 1 byte with AH
+
+@@Continue:
+        inc  SI                         ; iterate width
+        inc  DI
+
+        dec  CH
+        cmp  CH, 00h                    ; if not end of the line
+        ja   @@Loop                     ; repeat
+        mov  CH, AL                     ; reset width
+        
+        xor  AH, AH
+
+        sub  DI, AX                     ; move iterator back to first symbol
+        sub  SI, AX                     ; of the line
+
+        add  DI, 80d * 2                ; next line
+        add  SI, 80d * 2                ; next line
+
+        dec  CL                         ; iterate height
+        cmp  CL, 00h
+        ja   @@Loop
+
+        ret
+endp
+
+;==============================================
+; Our resident function
+; Registers:
+;       AX - Color|symbol
+;       BX = DI - Video addr to write into
+;       DS - Curr (code) segment
+;       ES - Video segment
+;       SI - Border buffer
+;       CX - Border len
+;==============================================
+
+Res08   proc
+        cmp CS:ISOn, 00h                        ; if frame is off
+        je  @@NoFrame                           ; do nothing
+
+        push CX
+        mov CX, 1006h                           ; set Width|Height
+        call UpdateBuf                          ; Update screen buffer
+        pop CX
+
+        call DrawFrame                          ; draw frame to the video page 2
+        
+        ; Copy Buffer to Screen
+        push DI CX SI DS BX
+
+        mov DI, CS:CURDI                        ; DI = top-left corner
+        mov SI, DI                              ; SI = DI
+        
+        mov CX, 0B800h + 80 / 16 * 25 * 2 * 2   ; segment of page 2
+        mov DS, CX                              ; DS = 0b800h + page size
+        
+        mov CX, 1006h                           ; CX = Heigth|Width
+        
+        mov BH, 01h                             ; BH = 1 - copy from buffer to screen
+        call CpyBuf
+        pop BX DS SI CX DI
+
 @@NoFrame:
-        db 0EAh                         ; longjmp
-Old08   dd 0
+        db 0EAh                                 ; longjmp
+Old08   dd 0                                    ; to the original int 08h
 endp
 
 ;==============================================
@@ -296,17 +453,19 @@ LSHIFTU = 2Ah or 80h
 ; to (from) the screen
 ; Expects:
 ;       DI - Top-Left corner of the border
-;       ES - Video Segment
 ;       CH - Height
 ;       CL - Width
 ;       SI - Buffer to draw from
-;       BH - 00h  = copy from buf to scr
-;            else = copy from scr to buf
-; Destr:
-;       AX
+;       DS - Segment to draw from
+;       BH - 00h  = copy from scr to buf
+;            else = copy from buf to scr
 ;==============================================
 
 CpyBuf proc pascal
+USES AX, ES
+        mov AX, 0B800h                          ; ES = video buffer
+        mov ES, AX
+
         xor AX, AX
         mov AL, CH                              ; save width to AL
 
@@ -314,14 +473,13 @@ CpyBuf proc pascal
         cmp BH, 00h                             ; if BH != 0, copy from screen to buffer
         jne @@Saving
 
-        mov BL, CS:[SI]                         ; copy bytes to videomem
+        mov BL, DS:[SI]                         ; copy bytes to videomem
         mov ES:[DI], BL
         jmp @@Moving
 
 @@Saving:
-        mov BL, ES:[DI]
-        mov CS:[SI], BL
-        ; movs BYTE PTR CS:[SI], ES:[DI]          ; save bytes to buffer
+        mov BL, ES:[DI]                         ; save bytes to buffer
+        mov DS:[SI], BL
 
 @@Moving:
         inc  SI
@@ -333,8 +491,10 @@ CpyBuf proc pascal
         mov  CH, AL                             ; reset width
 
         sub  DI, AX                             ; move DI back to the first byte
+        sub  SI, AX                             ; move SI back to the first byte
 
         add  DI, 80d * 2                        ; next line
+        add  SI, 80d * 2                        ; next line
 
         dec  CL                                 ; iterate height
         cmp  CL, 00h
@@ -355,16 +515,17 @@ endp
 ;==============================================
 
 SwitchOn proc pascal
-USES AX, BX, CX, DI, SI, ES
-        mov BH, CS:ISOn                 ; On/Off flag to BL
+USES AX, BX, CX, DI, DS, SI, ES
+        mov BH, CS:ISOn                 ; On/Off flag to BH
 
         mov DI, CS:CURDI                ; set DI to current top-left pos
 
         mov SI, DI
-        add SI, 80 * 25 * 2             ; next video page
+        add SI, 80 * 25 * 2             ; video page 2
 
         mov AX, 0B800h                  ; save video segment to ES
         mov ES, AX
+        mov DS, AX                      ; DS = ES
 
         mov CX, 1006h                   ; CX = Width|Height
         
@@ -447,7 +608,8 @@ endp
 
 RegVal  db 4 dup ('0'), '$'
 HEX     db '0123456789ABCDEFghijklmnop'
-BRD	db 0DAh, 0C4h, 0BFh, 0B3h, ' ', 0B3h, 0C0h, 0C4h, 0D9h	; std border 1 symbols
+BRD     db '#@#$ $#@#'
+; BRD	db 0DAh, 0C4h, 0BFh, 0B3h, ' ', 0B3h, 0C0h, 0C4h, 0D9h	; std border 1 symbols
 CURDI   dw (80 * 2 - 8) * 2
 ISOn    db 00h
 LShDwn  db 00h
