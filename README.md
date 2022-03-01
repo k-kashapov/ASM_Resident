@@ -1,5 +1,5 @@
 # ASM_Resident
-Resident program, that processes key press and time step interruptions in DOS
+A resident program, that processes key press and time step interruptions in DOS
 
 # Overview
 This is a resident program written for DOS using Assembly language.
